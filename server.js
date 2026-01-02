@@ -79,12 +79,15 @@ async function initializeHighPerformanceEngine(name, config) {
         return;
     }
 
-    // Initialize Provider with static network to bypass "failed to detect network" loops
-    const provider = new JsonRpcProvider(rpcUrl, config.chainId, { staticNetwork: true });
+    // Initialize Provider with static network. 
+    // Fix: In ethers v6, staticNetwork: true is passed in the options object correctly as part of a static network definition.
+    const network = ethers.Network.from(config.chainId);
+    const provider = new JsonRpcProvider(rpcUrl, network, { staticNetwork: network });
     
     // Resilient Base Balance Checker
+    const baseNetwork = ethers.Network.from(8453);
     const baseRpcUrl = NETWORKS.BASE.rpc[poolIndex.BASE % NETWORKS.BASE.rpc.length];
-    const baseProvider = new JsonRpcProvider(baseRpcUrl, 8453, { staticNetwork: true });
+    const baseProvider = new JsonRpcProvider(baseRpcUrl, baseNetwork, { staticNetwork: baseNetwork });
     
     const wallet = new Wallet(PRIVATE_KEY, provider);
     let flashbots = null;
