@@ -19,22 +19,26 @@ require("dotenv").config();
 // Multi-Chain Infrastructure with Multi-Pool Fallbacks
 const NETWORKS = {
     ETHEREUM: {
+        chainId: 1,
         rpc: [process.env.ETH_RPC, "https://eth.llamarpc.com", "https://rpc.ankr.com/eth"],
         wss: [process.env.ETH_WSS, "wss://eth.llamarpc.com", "wss://ethereum.publicnode.com"],
         relay: "https://relay.flashbots.net",
         isL2: false
     },
     BASE: {
+        chainId: 8453,
         rpc: [process.env.BASE_RPC, "https://mainnet.base.org", "https://base.llamarpc.com"],
         wss: [process.env.BASE_WSS, "wss://base.publicnode.com", "wss://base-rpc.publicnode.com"],
         isL2: true
     },
     POLYGON: {
+        chainId: 137,
         rpc: [process.env.POLYGON_RPC, "https://polygon-rpc.com", "https://rpc-mainnet.maticvigil.com"],
         wss: [process.env.POLYGON_WSS, "wss://polygon-bor-rpc.publicnode.com"],
         isL2: true
     },
     ARBITRUM: {
+        chainId: 42161,
         rpc: [process.env.ARBITRUM_RPC, "https://arb1.arbitrum.io/rpc", "https://arbitrum.llamarpc.com"],
         wss: [process.env.ARBITRUM_WSS, "wss://arbitrum-one.publicnode.com"],
         isL2: true
@@ -57,37 +61,51 @@ async function main() {
     console.log("  THRESHOLD: 0.005 BASE ETH REQUIRED");
     console.log("--------------------------------------------------");
 
-    await Promise.all(Object.entries(NETWORKS).map(([name, config]) => {
-        return initializeHighPerformanceEngine(name, config);
-    }));
+    // Run each chain engine. Catch errors at the top level to prevent global crashes.
+    Object.entries(NETWORKS).forEach(([name, config]) => {
+        initializeHighPerformanceEngine(name, config).catch(err => {
+            console.error(`[${name}] Critical Init Error:`, err.message);
+        });
+    });
 }
 
 async function initializeHighPerformanceEngine(name, config) {
-    const currentRpc = config.rpc[poolIndex[name] % config.rpc.length];
-    const currentWss = config.wss[poolIndex[name] % config.wss.length];
+    // Select RPC and WSS from the pool
+    const rpcUrl = config.rpc[poolIndex[name] % config.rpc.length] || config.rpc[0];
+    const wssUrl = config.wss[poolIndex[name] % config.wss.length] || config.wss[0];
 
-    if (!currentRpc || !currentWss) {
-        console.error(`[${name}] No valid endpoints in pool.`);
+    if (!rpcUrl || !wssUrl) {
+        console.error(`[${name}] Missing RPC/WSS endpoints. Check .env`);
         return;
     }
 
-    const provider = new JsonRpcProvider(currentRpc);
-    const baseProvider = new JsonRpcProvider(NETWORKS.BASE.rpc[0]); // Primary Base endpoint for checks
+    // Initialize Provider with static network to bypass "failed to detect network" loops
+    const provider = new JsonRpcProvider(rpcUrl, config.chainId, { staticNetwork: true });
+    
+    // Resilient Base Balance Checker
+    const baseRpcUrl = NETWORKS.BASE.rpc[poolIndex.BASE % NETWORKS.BASE.rpc.length];
+    const baseProvider = new JsonRpcProvider(baseRpcUrl, 8453, { staticNetwork: true });
+    
     const wallet = new Wallet(PRIVATE_KEY, provider);
     let flashbots = null;
 
-    if (!config.isL2) {
+    if (!config.isL2 && config.relay) {
         try {
             const authSigner = Wallet.createRandom();
             flashbots = await FlashbotsBundleProvider.create(provider, authSigner, config.relay);
         } catch (e) { console.error(`[${name}] Flashbots Init Failed`); }
     }
 
-    const ws = new WebSocket(currentWss);
+    const ws = new WebSocket(wssUrl);
 
     ws.on('open', () => {
-        console.log(`[${name}] Connected to Pool [${poolIndex[name]}]: ${currentWss.split('/')[2]}`);
-        ws.send(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_subscribe", params: ["newPendingTransactions"] }));
+        console.log(`[${name}] Connected to [${wssUrl.split('/')[2]}] (Pool Index: ${poolIndex[name] % config.wss.length})`);
+        ws.send(JSON.stringify({ 
+            jsonrpc: "2.0", 
+            id: 1, 
+            method: "eth_subscribe", 
+            params: ["newPendingTransactions"] 
+        }));
     });
 
     ws.on('message', async (data) => {
@@ -109,21 +127,24 @@ async function initializeHighPerformanceEngine(name, config) {
                     console.log(`[${name}] SIGNAL | Gain: ${signal.gain}% | Latency: ${latency.toFixed(2)}μs`);
                     await executeSafeAtomicTrade(name, provider, wallet, flashbots, signal);
                 }
-            } catch (err) { /* Silent fail */ }
+            } catch (err) {
+                // If Base RPC fails, rotate the global Base index
+                if (err.message.includes("network") || err.message.includes("429")) {
+                    poolIndex.BASE++;
+                }
+            }
         }
     });
 
     ws.on('error', (error) => {
-        console.error(`[${name}] Connection Error on Pool [${poolIndex[name]}]: ${error.message}`);
+        console.error(`[${name}] WebSocket Error: ${error.message}`);
         ws.terminate();
     });
 
     ws.on('close', () => {
-        // Cycle to next endpoint in the pool
         poolIndex[name]++;
-        const delay = 3000;
-        console.log(`[${name}] Connection lost. Cycling to next RPC/WSS in 3s...`);
-        setTimeout(() => initializeHighPerformanceEngine(name, config), delay);
+        console.log(`[${name}] Connection lost. Rotating to next provider in 5s...`);
+        setTimeout(() => initializeHighPerformanceEngine(name, config), 5000);
     });
 }
 
@@ -159,7 +180,7 @@ async function executeSafeAtomicTrade(chain, provider, wallet, fb, signal) {
             data: "0x", 
             value: tradeAmount,
             gasLimit: gasLimit,
-            maxFeePerGas: gasData.maxFeePerGas * 115n / 100n,
+            maxFeePerGas: gasData.maxFeePerGas ? (gasData.maxFeePerGas * 120n / 100n) : undefined,
             maxPriorityFeePerGas: ethers.parseUnits("7", "gwei"),
             type: 2
         };
